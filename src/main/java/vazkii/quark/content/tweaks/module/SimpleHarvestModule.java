@@ -21,6 +21,7 @@ import com.mojang.brigadier.exceptions.CommandSyntaxException;
 
 import net.minecraft.commands.arguments.blocks.BlockStateParser;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.InteractionHand;
@@ -37,7 +38,10 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.CropBlock;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraftforge.common.MinecraftForge;
+import net.minecraftforge.common.util.BlockSnapshot;
 import net.minecraftforge.event.entity.player.PlayerInteractEvent;
+import net.minecraftforge.event.world.BlockEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.registries.ForgeRegistries;
 import net.minecraftforge.registries.IForgeRegistryEntry;
@@ -135,7 +139,7 @@ public class SimpleHarvestModule extends QuarkModule {
 		}
 	}
 
-	private static void harvestAndReplant(Level world, BlockPos pos, BlockState inWorld, Player player) {
+	private static void harvestAndReplant(Level world, BlockPos pos, BlockState blockState, Player player) {
 		if (!(world instanceof ServerLevel))
 			return;
 
@@ -152,8 +156,8 @@ public class SimpleHarvestModule extends QuarkModule {
 		enchMap.put(Enchantments.BLOCK_FORTUNE, fortune);
 		EnchantmentHelper.setEnchantments(enchMap, copy);
 
-		Item blockItem = inWorld.getBlock().asItem();
-		Block.getDrops(inWorld, (ServerLevel) world, pos, world.getBlockEntity(pos), player, copy)
+		Item blockItem = blockState.getBlock().asItem();
+		Block.getDrops(blockState, (ServerLevel) world, pos, world.getBlockEntity(pos), player, copy)
 			.forEach((stack) -> {
 				if(stack.getItem() == blockItem)
 					stack.shrink(1);
@@ -161,14 +165,28 @@ public class SimpleHarvestModule extends QuarkModule {
 				if(!stack.isEmpty())
 					Block.popResource(world, pos, stack);
 			});
-		inWorld.spawnAfterBreak((ServerLevel) world, pos, copy);
 
 		// ServerLevel sets this to `false` in the constructor, do we really need this check?
-		if (!world.isClientSide) {
-			BlockState newBlock = crops.get(inWorld);
-			world.levelEvent(2001, pos, Block.getId(newBlock));
-			world.setBlockAndUpdate(pos, newBlock);
-		}
+		if (world.isClientSide) 
+			return;
+
+		// Destroy the block and signal the Event Bus
+		world.destroyBlock(pos, false);
+		MinecraftForge.EVENT_BUS.post(new BlockEvent.BreakEvent(world, pos, blockState, player));
+
+		// Get the replacement state
+		BlockState replacementBlockState = crops.get(blockState);
+		// Trigger block destroy effect on surrounding Clients (See LevelRenderer.java)
+		world.levelEvent(2001, pos, Block.getId(replacementBlockState));
+		// Set the replacement block in the world + update neighbours
+		world.setBlockAndUpdate(pos, replacementBlockState);
+
+		// Get a block snapshot that we can broadcast as an event
+		BlockSnapshot replacementBlockSnapshot = BlockSnapshot.create(world.dimension(), world, pos);
+		// Since it's a crop, we know there'll be a block underneath so we'll grab that
+		BlockState placedAgainst = world.getBlockState(pos.relative(Direction.DOWN));
+		// Signal a place event to the Event Bus
+		MinecraftForge.EVENT_BUS.post(new BlockEvent.EntityPlaceEvent(replacementBlockSnapshot, placedAgainst, player));
 	}
 
 	@SubscribeEvent
